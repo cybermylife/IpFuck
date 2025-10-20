@@ -13,7 +13,7 @@ Ultimate IP reconnaissance tool with integrated scanning capabilities.
 One-liner installation:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/TONUSER/ipfuck/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/CyberMyLife/IpFuck/main/install.sh | bash
 ```
 
 ## Usage
