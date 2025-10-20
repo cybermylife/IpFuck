@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# ipfuck - Ultimate IP reconnaissance tool with integrated tools
+# Usage: ipfuck <target> [-1|-2|-3]
+
+set -euo pipefail
+
+TARGET=""
+LEVEL="-1"
+VERSION="2.0"
+
+# Simple arg parsing
+for arg in "$@"; do
+  case "$arg" in
+    -1|-2|-3) LEVEL="$arg" ;;
+    -h|--help)
+      echo "ipfuck ${VERSION} - Ultimate IP Reconnaissance Tool"
+      echo "Usage: ipfuck <ip|domain|url> [-1|-2|-3]"
+      echo "  -1  Quick and efficient"
+      echo "  -2  Medium scan with service detection"
+      echo "  -3  Aggressive deep scan"
+      exit 0
+      ;;
+    -v|--version)
+      echo "ipfuck ${VERSION}"; exit 0 ;;
+    -*) ;;
+    *) TARGET="$arg" ;;
+  esac
+done
+
+if [[ -z "$TARGET" ]]; then
+  echo "Usage: ipfuck <ip|domain|url> [-1|-2|-3]"
+  exit 1
+fi
+
+# Normalize target
+HOST="${TARGET}"
+if [[ "$HOST" =~ ^https?:// ]]; then
+  HOST="${HOST#*://}"
+fi
+HOST="${HOST%%/*}"
+if [[ "$HOST" == *:* ]]; then
+  HOST="${HOST%%:*}"
+fi
+
+# Resolve host to IP
+resolve_host() {
+  local input="$1"
+  if [[ "$input" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    echo "$input"
+    return 0
+  fi
+  getent ahostsv4 "$input" 2>/dev/null | awk '{print $1}' | head -1
+}
+
+IP="$(resolve_host "$HOST")"
+if [[ -z "$IP" ]]; then
+  echo "Resolution failed for $HOST"
+  exit 1
+fi
+
+echo "=== ipfuck ${VERSION} ==="
+echo "target: $TARGET"
+echo "host:   $HOST"
+echo "ip:     $IP"
+echo "level:  $LEVEL"
+echo
+
+log_section() { echo "-- $1"; }
+
+# Integrated ping function
+ping_host() {
+  if ping -c1 -W2 "$IP" 2>/dev/null; then
+    echo "Host is alive"
+  else
+    echo "Host unreachable"
+  fi
+}
+
+# Integrated whois function
+whois_lookup() {
+  if command -v whois &>/dev/null; then
+    whois "$IP" | sed -n '1,80p'
+  else
+    echo "whois not available"
+  fi
+}
+
+# Integrated reverse DNS
+reverse_dns() {
+  if command -v dig &>/dev/null; then
+    dig +short -x "$IP" || echo "No reverse DNS"
+  elif command -v nslookup &>/dev/null; then
+    nslookup "$IP" 2>/dev/null | grep "name" | awk '{print $4}' || echo "No reverse DNS"
+  else
+    echo "DNS tools not available"
+  fi
+}
+
+# Integrated geolocation
+geo_lookup() {
+  echo "ipinfo.io:"
+  curl -s "https://ipinfo.io/${IP}/json" 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "API unavailable"
+  echo
+  echo "ipapi.co:"
+  curl -s "https://ipapi.co/${IP}/json" 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "API unavailable"
+}
+
+# Integrated port scanner
+port_scan() {
+  local ports=""
+  
+  if command -v nmap &>/dev/null; then
+    case "$LEVEL" in
+      -1)
+        echo "Quick nmap scan (top 100 ports)..."
+        nmap -Pn --top-ports 100 -sV --reason "$IP" 2>/dev/null || echo "Nmap failed"
+        ;;
+      -2)
+        echo "Medium nmap scan (top 1000 ports)..."
+        ports=$(nmap -Pn -p- --min-rate 2000 --open --max-retries 1 "$IP" -oG - 2>/dev/null | awk -F/ '/Ports:/ {print $1}' | awk -FPorts: '{print $2}' | sed 's/ //g' | tr -d '\n')
+        if [[ -n "$ports" ]]; then
+          nmap -Pn -sV -sC -O --reason -p"$ports" "$IP" 2>/dev/null || echo "Nmap failed"
+        else
+          nmap -Pn --top-ports 1000 -sV -sC "$IP" 2>/dev/null || echo "Nmap failed"
+        fi
+        ;;
+      -3)
+        echo "Aggressive nmap scan (all ports)..."
+        ports=$(nmap -Pn -p- --min-rate 5000 --open --max-retries 1 "$IP" -oG - 2>/dev/null | awk -F/ '/Ports:/ {print $1}' | awk -FPorts: '{print $2}' | sed 's/ //g' | tr -d '\n')
+        if [[ -n "$ports" ]]; then
+          nmap -Pn -sV -sC -O --reason --script vuln,default,safe -p"$ports" "$IP" 2>/dev/null || echo "Nmap failed"
+        else
+          nmap -Pn -p- -sV -sC -O --reason --script vuln,default,safe "$IP" 2>/dev/null || echo "Nmap failed"
+        fi
+        ;;
+    esac
+  else
+    echo "Nmap not available"
+  fi
+}
+
+# Integrated HTTP scanner
+http_scan() {
+  local web_ports="80,443,8080,8443,8000,8888"
+  IFS=',' read -r -a ports <<< "$web_ports"
+  
+  for port in "${ports[@]}"; do
+    if timeout 3 bash -c "echo >/dev/tcp/${IP}/${port}" 2>/dev/null; then
+      echo "HTTP service detected on port $port"
+      
+      # Basic HTTP probe
+      echo "Headers:"
+      curl -I --max-time 6 "http://${IP}:${port}" 2>/dev/null || echo "No HTTP response"
+      
+      # SSL check for HTTPS ports
+      if [[ "$port" == "443" || "$port" == "8443" ]]; then
+        echo "SSL Certificate:"
+        timeout 8 openssl s_client -connect "${IP}:${port}" -servername "$HOST" </dev/null 2>/dev/null | openssl x509 -noout -text 2>/dev/null | head -20 || echo "No SSL"
+      fi
+      echo
+    fi
+  done
+}
+
+# Integrated traceroute
+trace_route() {
+  if command -v mtr &>/dev/null; then
+    mtr -r -c 8 "$IP" 2>/dev/null || echo "MTR failed"
+  elif command -v traceroute &>/dev/null; then
+    traceroute "$IP" 2>/dev/null || echo "Traceroute failed"
+  else
+    echo "Traceroute tools not available"
+  fi
+}
+
+# Integrated service probes
+service_probes() {
+  local open_ports=""
+  
+  # Get open ports from nmap output
+  if command -v nmap &>/dev/null; then
+    open_ports=$(nmap -Pn -p- --open "$IP" 2>/dev/null | grep "open" | awk '{print $1}' | cut -d'/' -f1 | tr '\n' ',' | sed 's/,$//')
+  fi
+  
+  if [[ -n "$open_ports" ]]; then
+    echo "Service probes for ports: $open_ports"
+    
+    # SMB probes
+    if [[ "$open_ports" == *"445"* || "$open_ports" == *"139"* ]]; then
+      echo "SMB enumeration:"
+      if command -v smbclient &>/dev/null; then
+        smbclient -L "//$IP" -N -m SMB3 2>/dev/null || echo "SMB enumeration failed"
+      fi
+      echo
+    fi
+    
+    # SSH probe
+    if [[ "$open_ports" == *"22"* ]]; then
+      echo "SSH banner:"
+      timeout 5 bash -c "echo | nc -w3 $IP 22" 2>/dev/null || echo "SSH probe failed"
+      echo
+    fi
+    
+    # FTP probe
+    if [[ "$open_ports" == *"21"* ]]; then
+      echo "FTP banner:"
+      timeout 5 bash -c "echo quit | nc -w3 $IP 21" 2>/dev/null || echo "FTP probe failed"
+      echo
+    fi
+    
+    # SMTP probe
+    for smtp_port in 25 465 587; do
+      if [[ "$open_ports" == *"$smtp_port"* ]]; then
+        echo "SMTP banner (port $smtp_port):"
+        timeout 5 bash -c "echo EHLO test | nc -w3 $IP $smtp_port" 2>/dev/null || echo "SMTP probe failed"
+        echo
+      fi
+    done
+  fi
+}
+
+# Main execution
+log_section "ping"
+ping_host
+echo
+
+log_section "whois"
+whois_lookup
+echo
+
+log_section "reverse dns"
+reverse_dns
+echo
+
+log_section "geolocation"
+geo_lookup
+echo
+
+log_section "port scan"
+port_scan
+echo
+
+if [[ "$LEVEL" == "-2" || "$LEVEL" == "-3" ]]; then
+  log_section "http scan"
+  http_scan
+fi
+
+if [[ "$LEVEL" == "-3" ]]; then
+  log_section "service probes"
+  service_probes
+fi
+
+log_section "traceroute"
+trace_route
+echo
+
+echo "=== done ==="
